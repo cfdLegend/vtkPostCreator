@@ -1,0 +1,127 @@
+trigger:
+- master
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: 'DevOps/pipeline-templates'
+
+stages:
+  - stage: Version
+    displayName: Version
+    jobs:
+      - template: version.yaml@templates
+
+  - stage: Build
+    displayName: Build-cmake-c++
+    dependsOn: Version
+    jobs:
+      - job: Build_with_cmake
+        displayName: Build
+        pool:
+          name: "Linux CFD"
+          demands: ['AGENT_CFD_SITE -equals HPC9']
+        steps:         
+          - script: >
+              source /usr/share/Modules/init/bash;
+              export LD_LIBRARY_PATH=/cfd/aerocfd/codes/gcc/gcc-11.2.0/lib64:/cfd/aerocfd/codes/gcc/gcc-11.2.0/lib:${LD_LIBRARY_PATH}:/usr/local/lib;
+              export CC=/cfd/aerocfd/codes/gcc/gcc-11.2.0/bin/gcc;
+              export CXX=/cfd/aerocfd/codes/gcc/gcc-11.2.0/bin/gcc; 
+              module use /cfd/aerocfd/codes/modulefiles; 
+              module load cmake vtk; 
+              mkdir build; 
+              cd build; 
+              cmake ../ -DCMAKE_INSTALL_PREFIX=$(Build.ArtifactStagingDirectory) -DCMAKE_CXX_FLAGS_RELEASE=""
+            displayName: "Configure cmake"
+          
+          - script: |
+              make
+            displayName: "Make"
+            workingDirectory: build
+
+          - script: |
+              make install
+            displayName: "Cmake install to dist"
+            workingDirectory: build
+
+          - task: ArchiveFiles@2
+            displayName: 'Create artifact'
+            inputs:
+              rootFolderOrFile: $(Build.ArtifactStagingDirectory)
+              includeRootFolder: false
+              archiveType: 'tar'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/universal/$(Build.BuildId).tar.gz'
+              replaceExistingArchive: true
+          
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Build Artifact'
+            inputs:
+              PathtoPublish: "$(Build.ArtifactStagingDirectory)/universal/"
+              ArtifactName: 'build-artifacts'  
+
+          - task: CopyFiles@2
+            displayName: 'Collect compile_commands.json'
+            inputs:
+              SourceFolder: "$(Build.SourcesDirectory)/build"
+              Contents: "compile_commands.json"
+              TargetFolder: "$(Build.ArtifactStagingDirectory)/compile_commands/"
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Compile Commands'
+            inputs:
+              PathtoPublish: "$(Build.ArtifactStagingDirectory)/compile_commands/"
+              ArtifactName: 'compile-commands'                
+
+  - stage: Standards
+    displayName: Coding Standards
+    dependsOn: Build
+    jobs:
+     - job: SonarQube
+       displayName: SonarQube
+       pool:
+        name: "WILLIAMS-CLOUD-DEVOPS"
+       steps:
+
+        - download: current
+          artifact: compile-commands
+
+        # Prepare SonarQube
+        # https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/sonar-qube-prepare-v4
+        - task: SonarQubePrepare@5
+          displayName: Prepare SonarQube Analysis
+          continueOnError: true
+          inputs:
+            SonarQube: 'wf1-sonarqube'
+            scannerMode: 'CLI'
+            configMode: 'manual'
+            cliProjectKey: '$(Build.Repository.Name)'
+            cliProjectName: '$(Build.Repository.Name)'
+            cliProjectVersion: '$(build.buildNumber)'
+            cliSources: '$(Build.SourcesDirectory)'
+            extraproperties: |
+              sonar.cfamily.compile-commands=$(Pipeline.Workspace)/compile_commands.json
+              sonar.scm.exclusions.disabled=false
+              sonar.sources=$(Build.SourcesDirectory)
+              sonar.projectBaseDir=$(Build.SourcesDirectory)
+              sonar.cxx.file.suffixes=.cxx,.cpp,.cc,.c,.hxx,.hpp,.hh,.h
+              X
+
+        # Run SonarQube code analysis
+        # https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/sonar-qube-analyze-v5
+        - task: SonarQubeAnalyze@5
+          displayName: Run SonarQube Analysis
+          continueOnError: true
+
+        # Publish SonarQube code analysis to the server
+        # https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/sonar-qube-publish-v4
+        - task: SonarQubePublish@5
+          displayName: Publish SonarQube Analysis
+          continueOnError: true
+
+  - stage: Tag
+    displayName: Tag
+    dependsOn: Standards
+    jobs:
+      - template: build/tag.yaml@templates
+

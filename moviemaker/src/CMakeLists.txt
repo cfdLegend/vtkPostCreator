@@ -1,0 +1,4 @@
+add_subdirectory(moviemaker-common)
+include_directories(moviemaker-common)
+add_subdirectory(moviemaker)
+add_subdirectory(moviemaker-surface)
